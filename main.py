@@ -26,17 +26,7 @@ REQUESTED_CAMERA_INDEX = 0 # Note that 0 is the default camera for the system.
 REQUESTED_CAMERA_RESOLUTION = (1280, 720)
 REQUESTED_CAMERA_FRAMERATE = 15.0
 
-# Makes a (symmetric) perspective projection matrix from vertical field of view, aspect ratio (x/y) and near/far distance.
-def make_frustum(fov_y_rads: float, aspect_ratio: float, near: float, far: float):
-    half_tan = math.tan(fov_y_rads / 2)
-    top = near * half_tan
-    right = top * aspect_ratio
-    matrix = np.array([[near / right, 0,          0,                               0],
-                       [0,            near / top, 0,                               0],
-                       [0,            0,         -(far + near) / (far - near),    -1],
-                       [0,            0,         -(2 * far * near) / (far - near), 0]])
-    return matrix
-
+# Face landmark drawing from the mediapipe example code.
 def draw_face_landmarks(image, result):
     face_landmarks_list = result.face_landmarks
     for face_landmarks in face_landmarks_list:
@@ -66,11 +56,11 @@ def draw_face_landmarks(image, result):
             connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
     return image
 
+# Blendshape plotting from the mediapipe example code.
 def plot_face_blendshapes_bar_graph(face_blendshapes):
     # Extract the face blendshapes category names and scores.
     face_blendshapes_names = [face_blendshapes_category.category_name for face_blendshapes_category in face_blendshapes]
     face_blendshapes_scores = [face_blendshapes_category.score for face_blendshapes_category in face_blendshapes]
-    # The blendshapes are ordered in decreasing score value.
     face_blendshapes_ranks = range(len(face_blendshapes_names))
 
     _, ax = plt.subplots(figsize=(12, 12))
@@ -87,16 +77,15 @@ def plot_face_blendshapes_bar_graph(face_blendshapes):
     plt.tight_layout()
     plt.show()
 
+# Hand landmark drawing from the mediapipe example code.
 def draw_hand_landmarks(image, result):
     hand_landmarks_list = result.hand_landmarks
     handedness_list = result.handedness
 
-    # Loop through the detected hands to visualize.
     for idx in range(len(hand_landmarks_list)):
         hand_landmarks = hand_landmarks_list[idx]
         handedness = handedness_list[idx]
 
-        # Draw the hand landmarks.
         drawing_utils.draw_landmarks(
             image,
             hand_landmarks,
@@ -104,19 +93,29 @@ def draw_hand_landmarks(image, result):
             drawing_styles.get_default_hand_landmarks_style(),
             drawing_styles.get_default_hand_connections_style())
 
-        # Get the top left corner of the detected hand's bounding box.
+        # Get the top left corner of the hand's bounding box.
         height, width, _ = image.shape
         x_coordinates = [landmark.x for landmark in hand_landmarks]
         y_coordinates = [landmark.y for landmark in hand_landmarks]
         text_x = int(min(x_coordinates) * width)
         text_y = int(min(y_coordinates) * height) - 10
 
-        # Draw handedness (left or right hand) on the image.
+        # Draw text to denote which hand is which.
         cv2.putText(image, f"{handedness[0].category_name}",
                     (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX,
                     1, (88, 205, 54), 1, cv2.LINE_AA)
-
     return image
+
+# Make a (symmetric) perspective projection matrix from vertical field of view, aspect ratio (x/y) and near+far distance.
+def make_frustum(fov_y_rads: float, aspect_ratio: float, near: float, far: float):
+    half_tan = math.tan(fov_y_rads / 2)
+    top = near * half_tan
+    right = top * aspect_ratio
+    matrix = np.array([[near / right, 0,          0,                               0],
+                       [0,            near / top, 0,                               0],
+                       [0,            0,         -(far + near) / (far - near),    -1],
+                       [0,            0,         -(2 * far * near) / (far - near), 0]])
+    return matrix
 
 # Take a series of 3D input points, append homogeneous coordinate, perform matrix multipy, and perform perspective divide.
 def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:

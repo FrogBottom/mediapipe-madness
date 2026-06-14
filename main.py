@@ -131,7 +131,7 @@ def ndc_to_screen_points(ndc_points: np.ndarray, screen_size: tuple[int, int]) -
 
 # Draw a little coordinate axis gizmo using the specified object-to-view transform and camera projection transform.
 def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transform: np.ndarray) -> np.ndarray:
-    model_points = np.array([[0.1, 0.1, 0.1], [10, 0, 0], [0, 10, 0], [0, 0, 10]])
+    model_points = np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]])
     ndc_points = transform_points(model_points, np.matmul(view_transform, projection_transform))
     screen_points = ndc_to_screen_points(ndc_points, (image.shape[1], image.shape[0]))
 

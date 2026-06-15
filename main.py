@@ -1,10 +1,12 @@
-import mediapipe as mp
-from mediapipe.tasks.python import vision
+import time
+import math
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-import time
-import math
+
+import mediapipe as mp
+from mediapipe.tasks.python import vision
 
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -23,8 +25,11 @@ HAND_LANDMARKER_TASK_PATH = "hand_landmarker.task"
 FACE_LANDMARKER_TASK_PATH = "face_landmarker.task"
 
 REQUESTED_CAMERA_INDEX = 0 # Note that 0 is the default camera for the system.
-REQUESTED_CAMERA_RESOLUTION = (1280, 720)
-REQUESTED_CAMERA_FRAMERATE = 15.0
+REQUESTED_CAMERA_RESOLUTION = (640, 480)
+REQUESTED_CAMERA_FRAMERATE = 30.0
+
+GIZMO_SIZE_CM = 5.0
+WINDOW_NAME = "video"
 
 # Face landmark drawing from the mediapipe example code.
 def draw_face_landmarks(image, result):
@@ -130,7 +135,7 @@ def ndc_to_screen_points(ndc_points: np.ndarray, screen_size: tuple[int, int]) -
 
 # Draw a little coordinate axis gizmo using the specified object-to-view transform and camera projection transform.
 def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transform: np.ndarray) -> np.ndarray:
-    model_points = np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]])
+    model_points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]) * GIZMO_SIZE_CM
     ndc_points = transform_points(model_points, np.matmul(view_transform, projection_transform))
     screen_points = ndc_to_screen_points(ndc_points, (image.shape[1], image.shape[0]))
 
@@ -139,7 +144,7 @@ def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transfo
     cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[3][0], screen_points[3][1]), (255, 0, 0), 3)
     return image
 
-def show_image(image: np.ndarray, name: str = "video") -> int:
+def show_image(image: np.ndarray, name: str) -> int:
     cv2.imshow(name, image)
     return (cv2.waitKey(1) & 0xFF) # For a video stream, we need to pass a positive timeout value so that OpenCV handles window events.
 
@@ -169,9 +174,20 @@ def init_face_detector():
     detector = vision.FaceLandmarker.create_from_options(options)
     return detector
 
+def is_window_open(name: str) -> bool:
+    # We should mostly just be able to check if WIND_PROP_VISIBLE is < 1 (on most operating systems it will be 0 or negative if window is closed).
+    # Apparently on some linux GUI backends, checking any window property of a closed window can cause a null pointer exception, so we'll check for that too.
+    is_open = True
+    try:
+        if cv2.getWindowProperty(name, cv2.WND_PROP_ASPECT_RATIO) < 0: is_open = False
+    except cv2.error as e:
+        if e.code == -27: is_open = False # -27 is OpenCV's code for null pointer exception.
+        else: raise e
+    return is_open
+
 def main():
     # Initialize detector objects and video streams.
-    hand_detector = init_hand_detector()
+    # hand_detector = init_hand_detector()
     face_detector = init_face_detector()
     cam, resolution, fps = init_camera(REQUESTED_CAMERA_INDEX, REQUESTED_CAMERA_RESOLUTION, REQUESTED_CAMERA_FRAMERATE)
     video_writer = cv2.VideoWriter("video.mp4", cv2.VideoWriter.fourcc(*"MPEG"), fps, resolution)
@@ -193,18 +209,18 @@ def main():
         elapsed_ms = int((current_time_ns - last_time_ns) // 1e6)
         timestamp_ms = int(1000 * frame_number / fps)
         last_time_ns = current_time_ns
-        # print(f"Frame {frame_number}, frame time {elapsed_ms}ms, expected {int(1000 / fps)}ms.")
+        print(f"Frame {frame_number}, frame time {elapsed_ms}ms, expected {int(1000 / fps)}ms.")
 
         # Convert to a mediapipe image and run through face+hand detection.
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
         face_detector_result = face_detector.detect_for_video(mp_image, timestamp_ms)
-        hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms)
+        # hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms)
 
         # Create a black image and annotate it with our results. We could overlay on top of the original frame, if we wanted.
         annotated_image = np.zeros_like(mp_image.numpy_view())
         # annotated_image = np.copy(mp_image.numpy_view())
         annotated_image = draw_face_landmarks(annotated_image, face_detector_result)
-        annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
+        # annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
 
         if len(face_detector_result.facial_transformation_matrixes) > 0:
             annotated_image = draw_gizmo(annotated_image, face_detector_result.facial_transformation_matrixes[0].T, projection_transform)
@@ -213,10 +229,10 @@ def main():
         video_writer.write(annotated_image)
 
         # Try to show the image window.
-        key = show_image(annotated_image)
+        key = show_image(annotated_image, WINDOW_NAME)
 
-        # If the user pressed "ESC", exit the loop.
-        if (key == ord('\x1b')): break # '\x1b' is ESC key
+        # If the user closed the window or pressed "ESC", exit the loop.
+        if (not is_window_open(WINDOW_NAME)) or (key == ord('\x1b')): break # '\x1b' is ESC key
 
         # If the user pressed "b", show the blendshapes plot.
         if (key == ord('b')) and len(face_detector_result.face_blendshapes) > 0:
@@ -224,11 +240,8 @@ def main():
 
         frame_number += 1
 
-    cam.release()
-    video_writer.release()
     cv2.destroyAllWindows()
+    video_writer.release()
+    cam.release()
 
-if __name__ == "__main__":
-    main()
-
-
+if __name__ == "__main__": main()

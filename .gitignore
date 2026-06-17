@@ -1,4 +1,4 @@
 *.task
-video.mp4
 /.vscode
 /__pycache__
+*.webm

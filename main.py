@@ -14,9 +14,11 @@ HAND_LANDMARKER_TASK_PATH = "hand_landmarker.task"
 FACE_LANDMARKER_TASK_PATH = "face_landmarker.task"
 
 REQUESTED_CAMERA_INDEX = 0 # Note that 0 is the default camera for the system.
-REQUESTED_CAMERA_RESOLUTION = (640, 480)
-REQUESTED_CAMERA_FRAMERATE = 30.0
+REQUESTED_CAMERA_RESOLUTION = (1280, 720)
+REQUESTED_CAMERA_FRAMERATE = 15.0
 
+VIDEO_OUTPUT_FILENAME = "video.webm"
+VIDEO_OUTPUT_FOURCC = "vp80"
 WINDOW_NAME = "video"
 
 def show_image(image: np.ndarray, name: str) -> int:
@@ -65,7 +67,7 @@ def main():
     hand_detector = init_hand_detector()
     face_detector = init_face_detector()
     cam, resolution, fps = init_camera(REQUESTED_CAMERA_INDEX, REQUESTED_CAMERA_RESOLUTION, REQUESTED_CAMERA_FRAMERATE)
-    video_writer = cv2.VideoWriter("video.mp4", cv2.VideoWriter.fourcc(*"MPEG"), fps, resolution)
+    video_writer = cv2.VideoWriter(VIDEO_OUTPUT_FILENAME, cv2.VideoWriter.fourcc(*VIDEO_OUTPUT_FOURCC), fps, resolution)
 
     # Set up some timing info.
     frame_number: int = 0

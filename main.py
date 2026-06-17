@@ -1,25 +1,14 @@
 import time
-import math
-
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
 
 import mediapipe as mp
-from mediapipe.tasks.python import vision
+import numpy as np
+import cv2
 
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-HandLandmarkerResult = mp.tasks.vision.HandLandmarkerResult
-FaceLandmarker = mp.tasks.vision.FaceLandmarker
-FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
-FaceLandmarkerResult = mp.tasks.vision.FaceLandmarkerResult
-VisionRunningMode = mp.tasks.vision.RunningMode
-
-HandLandmarksConnections = mp.tasks.vision.HandLandmarksConnections
-drawing_utils = mp.tasks.vision.drawing_utils
-drawing_styles = mp.tasks.vision.drawing_styles
+from drawing_stuff import draw_gizmo, draw_face_landmarks, draw_hand_landmarks, plot_face_blendshapes_bar_graph
+from math_stuff import convert, make_frustum
+from geometry_data import CANONICAL_LEFTHAND_WEIGHTS, CANONICAL_RIGHTHAND_WEIGHTS,  \
+                          CANONICAL_LEFTHAND_VERTICES, CANONICAL_RIGHTHAND_VERTICES,\
+                          CANONICAL_FACE_WEIGHTS, CANONICAL_FACE_VERTICES
 
 HAND_LANDMARKER_TASK_PATH = "hand_landmarker.task"
 FACE_LANDMARKER_TASK_PATH = "face_landmarker.task"
@@ -28,121 +17,7 @@ REQUESTED_CAMERA_INDEX = 0 # Note that 0 is the default camera for the system.
 REQUESTED_CAMERA_RESOLUTION = (640, 480)
 REQUESTED_CAMERA_FRAMERATE = 30.0
 
-GIZMO_SIZE_CM = 5.0
 WINDOW_NAME = "video"
-
-# Face landmark drawing from the mediapipe example code.
-def draw_face_landmarks(image, result):
-    face_landmarks_list = result.face_landmarks
-    for face_landmarks in face_landmarks_list:
-        drawing_utils.draw_landmarks(
-            image=image,
-            landmark_list=face_landmarks,
-            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION,
-            landmark_drawing_spec=None,
-            connection_drawing_spec=drawing_styles.get_default_face_mesh_tesselation_style())
-        drawing_utils.draw_landmarks(
-            image=image,
-            landmark_list=face_landmarks,
-            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS,
-            landmark_drawing_spec=None,
-            connection_drawing_spec=drawing_styles.get_default_face_mesh_contours_style())
-        drawing_utils.draw_landmarks(
-            image=image,
-            landmark_list=face_landmarks,
-            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS,
-            landmark_drawing_spec=None,
-            connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
-        drawing_utils.draw_landmarks(
-            image=image,
-            landmark_list=face_landmarks,
-            connections=vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS,
-            landmark_drawing_spec=None,
-            connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
-    return image
-
-# Blendshape plotting from the mediapipe example code.
-def plot_face_blendshapes_bar_graph(face_blendshapes):
-    # Extract the face blendshapes category names and scores.
-    face_blendshapes_names = [face_blendshapes_category.category_name for face_blendshapes_category in face_blendshapes]
-    face_blendshapes_scores = [face_blendshapes_category.score for face_blendshapes_category in face_blendshapes]
-    face_blendshapes_ranks = range(len(face_blendshapes_names))
-
-    _, ax = plt.subplots(figsize=(12, 12))
-    bar = ax.barh(face_blendshapes_ranks, face_blendshapes_scores, label=[str(x) for x in face_blendshapes_ranks])
-    ax.set_yticks(face_blendshapes_ranks, face_blendshapes_names)
-    ax.invert_yaxis()
-
-    # Label each bar with values.
-    for score, patch in zip(face_blendshapes_scores, bar.patches):
-        plt.text(patch.get_x() + patch.get_width(), patch.get_y(), f"{score:.4f}", va="top")
-
-    ax.set_xlabel('Score')
-    ax.set_title("Face Blendshapes")
-    plt.tight_layout()
-    plt.show()
-
-# Hand landmark drawing from the mediapipe example code.
-def draw_hand_landmarks(image, result):
-    hand_landmarks_list = result.hand_landmarks
-    handedness_list = result.handedness
-
-    for idx in range(len(hand_landmarks_list)):
-        hand_landmarks = hand_landmarks_list[idx]
-        handedness = handedness_list[idx]
-
-        drawing_utils.draw_landmarks(
-            image,
-            hand_landmarks,
-            HandLandmarksConnections.HAND_CONNECTIONS,
-            drawing_styles.get_default_hand_landmarks_style(),
-            drawing_styles.get_default_hand_connections_style())
-
-        # Get the top left corner of the hand's bounding box.
-        height, width, _ = image.shape
-        x_coordinates = [landmark.x for landmark in hand_landmarks]
-        y_coordinates = [landmark.y for landmark in hand_landmarks]
-        text_x = int(min(x_coordinates) * width)
-        text_y = int(min(y_coordinates) * height) - 10
-
-        # Draw text to denote which hand is which.
-        cv2.putText(image, f"{handedness[0].category_name}",
-                    (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX,
-                    1, (88, 205, 54), 1, cv2.LINE_AA)
-    return image
-
-# Make a (symmetric) perspective projection matrix from vertical field of view, aspect ratio (x/y) and near+far distance.
-def make_frustum(fov_y_rads: float, aspect_ratio: float, near: float, far: float):
-    half_tan = math.tan(fov_y_rads / 2)
-    top = near * half_tan
-    right = top * aspect_ratio
-    matrix = np.array([[near / right, 0,          0,                               0],
-                       [0,            near / top, 0,                               0],
-                       [0,            0,         -(far + near) / (far - near),    -1],
-                       [0,            0,         -(2 * far * near) / (far - near), 0]])
-    return matrix
-
-# Take a series of 3D input points, append homogeneous coordinate, perform matrix multipy, and perform perspective divide.
-def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    p1 = np.hstack((points,np.ones((points.shape[0],1))))
-    p2 = np.array([np.matmul(np.array(p), transform) for p in p1])
-    p3 = np.array([p / p[3] for p in p2])
-    return p3
-
-# Convert NDC to screen coordinates. Note that the Y-axis is inverted.
-def ndc_to_screen_points(ndc_points: np.ndarray, screen_size: tuple[int, int]) -> np.ndarray:
-    return np.array([[int((p[0] + 1) * 0.5 * screen_size[0]), int((-p[1] + 1) * 0.5 * screen_size[1])] for p in ndc_points])
-
-# Draw a little coordinate axis gizmo using the specified object-to-view transform and camera projection transform.
-def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transform: np.ndarray) -> np.ndarray:
-    model_points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]) * GIZMO_SIZE_CM
-    ndc_points = transform_points(model_points, np.matmul(view_transform, projection_transform))
-    screen_points = ndc_to_screen_points(ndc_points, (image.shape[1], image.shape[0]))
-
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[1][0], screen_points[1][1]), (0, 0, 255), 3)
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[2][0], screen_points[2][1]), (0, 255, 0), 3)
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[3][0], screen_points[3][1]), (255, 0, 0), 3)
-    return image
 
 def show_image(image: np.ndarray, name: str) -> int:
     cv2.imshow(name, image)
@@ -163,15 +38,15 @@ def init_camera(requested_idx, requested_size:tuple[int,int], requested_fps: flo
     return cam, size, fps
 
 def init_hand_detector():
-    base_options = BaseOptions(model_asset_path='hand_landmarker.task')
-    options = HandLandmarkerOptions(base_options=base_options, running_mode = VisionRunningMode.VIDEO, num_hands=2)
-    detector = vision.HandLandmarker.create_from_options(options)
+    base_options = mp.tasks.BaseOptions(model_asset_path='hand_landmarker.task')
+    options = mp.tasks.vision.HandLandmarkerOptions(base_options=base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO, num_hands=2)
+    detector = mp.tasks.vision.HandLandmarker.create_from_options(options)
     return detector
 
 def init_face_detector():
-    base_options = BaseOptions(model_asset_path='face_landmarker.task')
-    options = FaceLandmarkerOptions(base_options=base_options, running_mode = VisionRunningMode.VIDEO, output_face_blendshapes=True, output_facial_transformation_matrixes=True, num_faces=1)
-    detector = vision.FaceLandmarker.create_from_options(options)
+    base_options = mp.tasks.BaseOptions(model_asset_path='face_landmarker.task')
+    options = mp.tasks.vision.FaceLandmarkerOptions(base_options=base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO, output_face_blendshapes=True, num_faces=1)
+    detector = mp.tasks.vision.FaceLandmarker.create_from_options(options)
     return detector
 
 def is_window_open(name: str) -> bool:
@@ -187,7 +62,7 @@ def is_window_open(name: str) -> bool:
 
 def main():
     # Initialize detector objects and video streams.
-    # hand_detector = init_hand_detector()
+    hand_detector = init_hand_detector()
     face_detector = init_face_detector()
     cam, resolution, fps = init_camera(REQUESTED_CAMERA_INDEX, REQUESTED_CAMERA_RESOLUTION, REQUESTED_CAMERA_FRAMERATE)
     video_writer = cv2.VideoWriter("video.mp4", cv2.VideoWriter.fourcc(*"MPEG"), fps, resolution)
@@ -198,7 +73,24 @@ def main():
     last_time_ns: int = start_time_ns
 
     # Create a perspective projection matrix. Based vaguely on the known FOV of the camera I'm using (Azure Kinect v2).
-    projection_transform = make_frustum(math.radians(53.7999992), resolution[0] / resolution[1], 0.1, 100)
+    projection_transform = make_frustum(np.deg2rad(53.7999992), resolution[0] / resolution[1], 0.1, 100)
+
+    # Set up the canonical landmarks and landmark weights.
+    canonical_face_indices = CANONICAL_FACE_WEIGHTS.keys()
+    canonical_face_landmarks = np.array([CANONICAL_FACE_VERTICES[i] for i in canonical_face_indices])
+    canonical_face_weights = np.array(list(CANONICAL_FACE_WEIGHTS.values()))
+    canonical_hand_indices = {
+        "Left": CANONICAL_LEFTHAND_WEIGHTS.keys(),
+        "Right": CANONICAL_RIGHTHAND_WEIGHTS.keys()
+    }
+    canonical_hand_landmarks = {
+        "Left": np.array([CANONICAL_LEFTHAND_VERTICES[i] for i in canonical_hand_indices["Left"]]),
+        "Right": np.array([CANONICAL_RIGHTHAND_VERTICES[i] for i in canonical_hand_indices["Right"]])
+    }
+    canonical_hand_weights = {
+        "Left": np.array(list(CANONICAL_LEFTHAND_WEIGHTS.values())),
+        "Right": np.array(list(CANONICAL_RIGHTHAND_WEIGHTS.values()))
+    }
 
     print("Press ESC to exit, or \"b\" to show blendshape weights.")
     while cam.isOpened():
@@ -214,16 +106,31 @@ def main():
         # Convert to a mediapipe image and run through face+hand detection.
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
         face_detector_result = face_detector.detect_for_video(mp_image, timestamp_ms)
-        # hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms)
+        hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms)
 
         # Create a black image and annotate it with our results. We could overlay on top of the original frame, if we wanted.
         annotated_image = np.zeros_like(mp_image.numpy_view())
         # annotated_image = np.copy(mp_image.numpy_view())
-        annotated_image = draw_face_landmarks(annotated_image, face_detector_result)
-        # annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
 
-        if len(face_detector_result.facial_transformation_matrixes) > 0:
-            annotated_image = draw_gizmo(annotated_image, face_detector_result.facial_transformation_matrixes[0].T, projection_transform)
+        # Process and draw face landmark data, if we got any.
+        if len(face_detector_result.face_landmarks) > 0:
+            annotated_image = draw_face_landmarks(annotated_image, face_detector_result)
+            landmarks = face_detector_result.face_landmarks[0]
+            runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_face_indices])
+
+            procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_face_landmarks, canonical_face_weights, projection_transform)
+            annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
+
+        # Process and draw hand landmark data, if we got any.
+        if len(hand_detector_result.handedness) > 0: annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
+        for i in range(len(hand_detector_result.handedness)):
+            landmarks = hand_detector_result.hand_landmarks[i]
+            hand = hand_detector_result.handedness[i][0].category_name
+            assert hand == "Left" or hand == "Right"
+            runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_hand_indices[hand]])
+
+            procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_hand_landmarks[hand], canonical_hand_weights[hand], projection_transform)
+            annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
 
         # Write our annotated video frame to the output stream.
         video_writer.write(annotated_image)
@@ -244,4 +151,6 @@ def main():
     video_writer.release()
     cam.release()
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    np.set_printoptions(suppress=True) # This just prevents numpy from printing everything in scientific notation.
+    main()

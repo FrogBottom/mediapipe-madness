@@ -13,15 +13,21 @@ HandLandmarksConnections = mp.tasks.vision.HandLandmarksConnections
 drawing_utils = mp.tasks.vision.drawing_utils
 drawing_styles = mp.tasks.vision.drawing_styles
 
+def draw_landmarks(image, landmarks, view_transform, projection_transform, color):
+    ndc_points = transform_points(landmarks, projection_transform @ view_transform, True)
+    screen_points = ndc_to_screen_points(ndc_points, (image.shape[1], image.shape[0]))
+    for point in screen_points:
+        cv2.drawMarker(image, (point[0], point[1]), color, cv2.MARKER_CROSS)
+    return image
+
 # Draw a little coordinate axis gizmo using the specified object-to-view transform and camera projection transform.
-def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transform: np.ndarray) -> np.ndarray:
+def draw_gizmo(image: np.ndarray, view_transform: np.ndarray, projection_transform: np.ndarray, brightness: float = 1.0) -> np.ndarray:
     model_points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]) * GIZMO_SIZE_CM
     ndc_points = transform_points(model_points, projection_transform @ view_transform, True)
     screen_points = ndc_to_screen_points(ndc_points, (image.shape[1], image.shape[0]))
-
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[1][0], screen_points[1][1]), (0, 0, 255), 3)
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[2][0], screen_points[2][1]), (0, 255, 0), 3)
-    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[3][0], screen_points[3][1]), (255, 0, 0), 3)
+    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[1][0], screen_points[1][1]), (0, 0, int(255 * brightness)), 3)
+    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[2][0], screen_points[2][1]), (0, int(255 * brightness), 0), 3)
+    cv2.arrowedLine(image, (screen_points[0][0], screen_points[0][1]), (screen_points[3][0], screen_points[3][1]), (int(255 * brightness), 0, 0), 3)
     return image
 
 # Convert NDC to screen coordinates. Note that the Y-axis is inverted.

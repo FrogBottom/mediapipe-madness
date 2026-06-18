@@ -8,7 +8,7 @@ import numpy as np
 def transform_points(points: np.ndarray, transform: np.ndarray, do_perspective_divide: bool = False) -> np.ndarray:
     points = np.hstack((points,np.ones((points.shape[0],1)))) # Append homogeneous coordinate to each point.
     transformed = points @ transform.T # Multiply. Using the transpose of the matrix lets us keep the output in row-order.
-    return (transformed / transformed[:,3])[:,:3] if do_perspective_divide else transformed[:, :3] # Strip off the homogeneous coordinate (or divide by it, if enabled).
+    return (transformed / transformed[:,3][:, np.newaxis])[:,:3] if do_perspective_divide else transformed[:, :3] # Strip off the homogeneous coordinate (or divide by it, if enabled).
 
 # Make a (symmetric) perspective projection matrix from vertical field of view, aspect ratio (x/y) and near+far distance.
 def make_frustum(fov_y_rads: float, aspect_ratio: float, near: float, far: float):
@@ -82,8 +82,8 @@ def weighted_extended_orthogonal_procrustes3(sources, targets, weights):
     }
 
 # Python rewrite of the mediapipe source, with minimal changes.
-def weighted_extended_orthogonal_procrustes2(sources, targets, sqrt_weights):
-    
+def weighted_extended_orthogonal_procrustes2(sources, targets, weights):
+    sqrt_weights = np.sqrt(weights)
     sqrt_weights_t = sqrt_weights.reshape(-1, 1)
     weighted_sources = (sources * sqrt_weights_t) # A_w
     weighted_targets = (targets * sqrt_weights_t) # B_w
@@ -119,7 +119,7 @@ def weighted_extended_orthogonal_procrustes2(sources, targets, sqrt_weights):
     }
 
 # @AI(Frog): When I was googling stuff, I was presumptuously offered a "working python solution" to this problem.
-# After much cleanup, I must begrudgingly admit that it does technically work.
+# After much cleanup, I must begrudgingly admit that it does technically (almost) work. Not quite though. Might be a handedness issue.
 # It's maybe more understandable than the mediapipe source if you aren't following along with the paper, but
 # in some respects it takes a slightly less optimal path there.
 def weighted_extended_orthogonal_procrustes(source_points, target_points, weights):
@@ -131,7 +131,7 @@ def weighted_extended_orthogonal_procrustes(source_points, target_points, weight
     # Make sure the weights sum to 1 (unit vector), and put them in the diagonal of a matrix for later.
     weights = weights / np.sum(weights)
     weights_as_column = weights.reshape(-1, 1)
-    weights_as_diag = np.diag(weights) 
+    weights_as_diag = np.diag(weights)
 
     # Compute the weighted average (centroid) of each list of input points.
     source_centroid = np.average(source_points, axis=0, weights=weights)
@@ -140,10 +140,10 @@ def weighted_extended_orthogonal_procrustes(source_points, target_points, weight
     # Adjust source and target so that the centroid is the origin, by subgracting the centroid from each point.
     source_centered = source_points - source_centroid
     target_centered = target_points - target_centroid
-    
+
     # Compute the "design matrix" which we will pass to SVD. The derivation of this is in the paper.
     design_matrix = source_centered.T @ (weights_as_column * target_centered)
-    
+
     # Do SVD, and use the outputs to compute the rotation matrix (this is the orthogonal matrix which gives the problem its name).
     U, _, Vt = np.linalg.svd(design_matrix)
     rotation_matrix = U @ Vt
@@ -157,10 +157,10 @@ def weighted_extended_orthogonal_procrustes(source_points, target_points, weight
     var_A = np.sum(weights_as_column * (source_centered ** 2))
     cov_AB = np.trace(source_centered @ rotation_matrix @ target_centered.T @ weights_as_diag)
     scale = cov_AB / var_A
-    
+
     # 7. Solve for the translation.
     translation = target_centroid - scale * (source_centroid @ rotation_matrix)
-    
+
     # Transform all the source points, just for fun.
     source_transformed = scale * (source_points @ rotation_matrix) + translation
 
@@ -172,14 +172,14 @@ def weighted_extended_orthogonal_procrustes(source_points, target_points, weight
     result_transform[0:3, 0:3] = scale * rotation_matrix
     result_transform[0:3, 3] = translation
     result_transform = result_transform
-    
+
     return {
         "scale": scale,
         "rotation": rotation_matrix,
         "translation": translation,
         "transformed_source_points": source_transformed,
         "disparity": disparity,
-        "result_transform": result_transform
+        "transform": result_transform
     }
 
 def compute_optimal_rotation(design_matrix) -> np.ndarray:
@@ -226,31 +226,64 @@ def change_handedness(landmarks):
     result[:, 2] *= -1
     return result
 
-def convert(runtime_screen_landmarks: np.ndarray, canonical_metric_landmarks: np.ndarray, landmark_weights: np.ndarray, projection_matrix: np.ndarray):
-    runtime_screen_landmarks = project_xy(projection_matrix, runtime_screen_landmarks)
-    depth_offset = np.mean(runtime_screen_landmarks[:, 2])
+# Some random ideas for improvements:
+# 1. If it were simple enough to run the procrustes solver with the non-diagonal weights matrix, we could potentially weight the relationship between pairs of landmarks more easily.
+# I haven't done the research to see if this is true in reality. If it is, we could possibly use more metric landmarks, by for example including the relationship between
+# joints along each finger, but ignoring the relationship between fingers and palm, etc. This would probably at least help with scale estimation.
+# 2. Since we estimate scale separately, it might be valuable to run the "first iteration" scale estimation with more (or all) landmarks, and a metric landmark set based on
+# the "world" landmarks that the model returns. Or there may be a simpler way to accomplish this. Could improve scale estimation quite a lot.
+# 3. In a similar vein, I wonder if we could take advantage of the structure of the hand without having to presume a rigidbody. Translation and scale estimation are pretty good.
+# The hard part is rotation. If there were some way to constrain the points such that each (non-thumb) finger's landmarks all exist on one plane, that might help.
+# 4. Another thing we could do is handle the depth rewrites in a special way just for hands. Maybe we can use the "world landmarks" just for the Z values?
+def convert(runtime_screen_landmarks: np.ndarray, canonical_metric_landmarks: np.ndarray, landmark_weights: np.ndarray, projection_matrix: np.ndarray, do_z_rewrites: bool=True):
+    # Step 1. Project landmarks to the frustum near plane. Note that this doesn't mean the Z coordinate is 0. We just move from screen space to one based on the frustum
+    # near plane size, and the total scale of Z is assumed to be equal to the total scale of X.
+    # This means that we do still have a Z coordinate, and the landmarks are not centered at Z=0 (hence the depth offset).
+    screen_landmarks_projected = project_xy(projection_matrix, runtime_screen_landmarks)
+    depth_offset = np.mean(screen_landmarks_projected[:, 2]) # Find average Z depth.
+    intermediate_landmarks = change_handedness(screen_landmarks_projected) # Landmarks come in left-handed, so we will flip to right-handed before doing any pose estimation.
 
-    intermediate_landmarks = change_handedness(runtime_screen_landmarks)
+    # Do the "first iteration" solve. We will throw away everything except the scale, and we will use the estimated scale to try and unproject, so that we have a better
+    # guess for the Z coordinates of the landmarks in "screen" space.
     first_result = weighted_extended_orthogonal_procrustes3(canonical_metric_landmarks, intermediate_landmarks, landmark_weights)
 
+    # Unproject back into "screen" space (and switch the handedness again).
     intermediate_landmarks = move_and_rescale_z(projection_matrix, depth_offset, first_result["scale"], intermediate_landmarks)
     intermediate_landmarks = unproject_xy(projection_matrix, intermediate_landmarks)
     intermediate_landmarks = change_handedness(intermediate_landmarks)
 
-    # @TODO(Frog): For face landmarks only, we have the "canonical metric landmarks" available.
-    # In the source they rewrite the Z coords using these and re-run the estimation here.
-    
+    # The mediapipe source only does this for face landmarks, since they don't have a set of "canonical metric landmarks" (basically a source mesh) for hand landmarks.
+    # We are experimenting to see if we can get awway with treating the palm landmarks as such a mesh, so if enabled, we do this for hands too.
+    if do_z_rewrites:
+        # Transform our canonical landmarks (source mesh) using the current estimated transform. Then we can steal the screen-space Z coordinate (depth)
+        # of those points. This assumes that transforming the source mesh will probably result in a better depth estimate than we had before.
+        z_rewrite_result = weighted_extended_orthogonal_procrustes3(canonical_metric_landmarks, intermediate_landmarks, landmark_weights)
+        transformed = transform_points(canonical_metric_landmarks, z_rewrite_result["transform"])
+        intermediate_landmarks[:, 2] = transformed[:, 2]
+
+    # Rerun the solver using our new estimated landmark positions, which now includes our estimate of a non-relative Z coordinate.
     second_result = weighted_extended_orthogonal_procrustes3(canonical_metric_landmarks, intermediate_landmarks, landmark_weights)
+
+    # The total scaling factor is the product of the scale estimates from each stage so far.
     total_scale = first_result["scale"] * second_result["scale"]
 
-    final_landmarks = move_and_rescale_z(projection_matrix, depth_offset, total_scale, runtime_screen_landmarks)
+    # Take the projected screen landmarks, apply our best estimate for Z depth (in the frustum space) and then unproject back to screen space (and switch handedness).
+    final_landmarks = move_and_rescale_z(projection_matrix, depth_offset, total_scale, screen_landmarks_projected)
     final_landmarks = unproject_xy(projection_matrix, final_landmarks)
     final_landmarks = change_handedness(final_landmarks)
 
+    # The final landmarks are now in the same coordinate space as the canonical metric landmarks, so we can actually do our final pose estimation to find the transform.
     final_result = weighted_extended_orthogonal_procrustes3(canonical_metric_landmarks, final_landmarks, landmark_weights)
-    
-    # @TODO(Frog): Same as above. For face landmarks only, we have the "canonical metric landmarks" available.
-    # In the source they rewrite the Z coords using these and re-run the estimation here.
 
-    runtime_metric_landmarks = transform_points(final_landmarks, final_result["transform"].T)
+    # OK I lied. If we are rewriting Z coordinates based on the canonical landmarks (source mesh), then we'll do that one more time and re-estimate.
+    if do_z_rewrites:
+        # Transform the canonical landmarks (source mesh) using our best-guess transform. Then steal the Z coordinates from those.
+        # We'll assume those Z coordinates are better than the ones we estimated. Then run pose estimation one last time.
+        transformed = transform_points(canonical_metric_landmarks, final_result["transform"])
+        final_landmarks[:, 2] = transformed[:, 2]
+        final_result = weighted_extended_orthogonal_procrustes3(canonical_metric_landmarks, final_landmarks, landmark_weights)
+
+    # If we want, we can transform the individual landmarks to align them with the "canonical" landmarks (source mesh).
+    transform_inv = np.linalg.inv(final_result["transform"])
+    runtime_metric_landmarks = transform_points(final_landmarks, transform_inv)
     return final_result, runtime_metric_landmarks

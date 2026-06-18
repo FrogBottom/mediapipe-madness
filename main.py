@@ -4,7 +4,7 @@ import mediapipe as mp
 import numpy as np
 import cv2
 
-from drawing_stuff import draw_gizmo, draw_face_landmarks, draw_hand_landmarks, plot_face_blendshapes_bar_graph
+from drawing_stuff import draw_gizmo, draw_landmarks, draw_face_landmarks, draw_hand_landmarks, plot_face_blendshapes_bar_graph
 from math_stuff import convert, make_frustum
 from geometry_data import CANONICAL_LEFTHAND_WEIGHTS, CANONICAL_RIGHTHAND_WEIGHTS,  \
                           CANONICAL_LEFTHAND_VERTICES, CANONICAL_RIGHTHAND_VERTICES,\
@@ -20,6 +20,11 @@ REQUESTED_CAMERA_FRAMERATE = 15.0
 VIDEO_OUTPUT_FILENAME = "video.webm"
 VIDEO_OUTPUT_FOURCC = "vp80"
 WINDOW_NAME = "video"
+
+DEFAULT_CAMERA_FOVY_DEG= 53.7999992
+# DEFAULT_CAMERA_FOVY_DEG= 62.0
+
+SHOW_TRANSFORM_FROM_FACE_MODEL = False
 
 def show_image(image: np.ndarray, name: str) -> int:
     cv2.imshow(name, image)
@@ -41,13 +46,19 @@ def init_camera(requested_idx, requested_size:tuple[int,int], requested_fps: flo
 
 def init_hand_detector():
     base_options = mp.tasks.BaseOptions(model_asset_path='hand_landmarker.task')
-    options = mp.tasks.vision.HandLandmarkerOptions(base_options=base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO, num_hands=2)
+    options = mp.tasks.vision.HandLandmarkerOptions(base_options=base_options,
+                                                    running_mode = mp.tasks.vision.RunningMode.VIDEO,
+                                                    num_hands=2)
     detector = mp.tasks.vision.HandLandmarker.create_from_options(options)
     return detector
 
 def init_face_detector():
     base_options = mp.tasks.BaseOptions(model_asset_path='face_landmarker.task')
-    options = mp.tasks.vision.FaceLandmarkerOptions(base_options=base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO, output_face_blendshapes=True, num_faces=1)
+    options = mp.tasks.vision.FaceLandmarkerOptions(base_options=base_options,
+                                                    running_mode = mp.tasks.vision.RunningMode.VIDEO,
+                                                    output_face_blendshapes=True,
+                                                    output_facial_transformation_matrixes=SHOW_TRANSFORM_FROM_FACE_MODEL,
+                                                    num_faces=1)
     detector = mp.tasks.vision.FaceLandmarker.create_from_options(options)
     return detector
 
@@ -75,7 +86,7 @@ def main():
     last_time_ns: int = start_time_ns
 
     # Create a perspective projection matrix. Based vaguely on the known FOV of the camera I'm using (Azure Kinect v2).
-    projection_transform = make_frustum(np.deg2rad(53.7999992), resolution[0] / resolution[1], 0.1, 100)
+    projection_transform = make_frustum(np.deg2rad(DEFAULT_CAMERA_FOVY_DEG), resolution[0] / resolution[1], 0.1, 100)
 
     # Set up the canonical landmarks and landmark weights.
     canonical_face_indices = CANONICAL_FACE_WEIGHTS.keys()
@@ -103,7 +114,7 @@ def main():
         elapsed_ms = int((current_time_ns - last_time_ns) // 1e6)
         timestamp_ms = int(1000 * frame_number / fps)
         last_time_ns = current_time_ns
-        print(f"Frame {frame_number}, frame time {elapsed_ms}ms, expected {int(1000 / fps)}ms.")
+        if frame_number % 10 == 0: print(f"Frame {frame_number}, frame time {elapsed_ms}ms, expected {int(1000 / fps)}ms.")
 
         # Convert to a mediapipe image and run through face+hand detection.
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
@@ -123,6 +134,11 @@ def main():
             procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_face_landmarks, canonical_face_weights, projection_transform)
             annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
 
+            if len(face_detector_result.facial_transformation_matrixes) > 0:
+                annotated_image = draw_gizmo(annotated_image, face_detector_result.facial_transformation_matrixes[0], projection_transform, brightness=0.5)
+
+            annotated_image = draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
+
         # Process and draw hand landmark data, if we got any.
         if len(hand_detector_result.handedness) > 0: annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
         for i in range(len(hand_detector_result.handedness)):
@@ -130,21 +146,22 @@ def main():
             hand = hand_detector_result.handedness[i][0].category_name
             assert hand == "Left" or hand == "Right"
             runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_hand_indices[hand]])
-
             procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_hand_landmarks[hand], canonical_hand_weights[hand], projection_transform)
+
             annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
+            annotated_image = draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
 
         # Write our annotated video frame to the output stream.
         video_writer.write(annotated_image)
 
         # Try to show the image window.
-        key = show_image(annotated_image, WINDOW_NAME)
+        key_pressed = show_image(annotated_image, WINDOW_NAME)
 
         # If the user closed the window or pressed "ESC", exit the loop.
-        if (not is_window_open(WINDOW_NAME)) or (key == ord('\x1b')): break # '\x1b' is ESC key
+        if (not is_window_open(WINDOW_NAME)) or (key_pressed == ord('\x1b')): break # '\x1b' is ESC key
 
         # If the user pressed "b", show the blendshapes plot.
-        if (key == ord('b')) and len(face_detector_result.face_blendshapes) > 0:
+        if (key_pressed == ord('b')) and len(face_detector_result.face_blendshapes) > 0:
             plot_face_blendshapes_bar_graph(face_detector_result.face_blendshapes[0])
 
         frame_number += 1

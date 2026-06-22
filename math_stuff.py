@@ -4,7 +4,46 @@ import numpy as np
 # Underneath those are 3 slightly different implementations of the "weighted extended orthogonal procrustes" solver.
 # Below those are all the helper functions used by the mediapipe code to to pose estimation, and the convert() function that calls them.
 
-# Take a series of 3D input points, append homogeneous coordinate, perform matrix multipy, and perform perspective divide.
+# Given a set of 21 "world" points representing hand landmarks, rotate them into a consistent orientation.
+# The specific process is:
+# 1. Pick the vector between wrist and middle knuckle as "Y".
+# 2. Take the cross product of "Y" with a vector from pinky knuckle to index knuckle. We'll call this "iX".
+# 3. Take the cross product of "iX" with "Y" to produce "Z".
+# 4. Take the cross product of "Y" and "Z" to produce "X".
+# 5. The vectors "X", "Y", and "Z" form our final basis vectors, which are used to transform the input points.
+def rotate_hand_world_landmarks(points, hand):
+    assert (hand == "Left" or hand == "Right")
+    initial_x = normalize(points[17] - points[5]) if hand == "Left" else normalize(points[5] - points[17])
+    y = normalize(points[9] - points[0])
+    z = np.cross(initial_x, y)
+    x = np.cross(y, z)
+
+    mat = np.eye(4)
+    mat[:3, :3] = np.array([x, y, z])
+    return transform_points(points, mat)
+
+# Normalize a vector. Doesn't handle lengths near zero (or perhaps numpy already does this, IDK).
+def normalize(v):
+    return v / np.linalg.norm(v)
+
+# Fit a plane to a set of points using SVD. Return the centroid and normal vector.
+# The direction (positive or negative) of the normal vector isn't totally deterministic here.
+# Probably there is something to do with the determinant of vh which could solve that.
+def fit_plane(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Calculate the centroid of the points, and then "center" the points by making it the origin.
+    centroid = np.mean(points, axis=0)
+    centered_points = points - centroid
+
+    # 4. Run SVD. I haven't looked at the math to double check, but evidently vh contains eigenvectors,
+    # of which the last row is our plane's normal vector.
+    _, _, vh = np.linalg.svd(centered_points)
+    normal = vh[-1, :]
+
+    # We could return this as plane equation coefficients (ax + by + cz + d = 0),
+    # but for our use-case just having the centroid and normal vector is convenient.
+    return centroid, normal
+
+# Take a series of 3D input points, append homogeneous coordinate, perform matrix multipy, and optionally perform perspective divide.
 def transform_points(points: np.ndarray, transform: np.ndarray, do_perspective_divide: bool = False) -> np.ndarray:
     points = np.hstack((points,np.ones((points.shape[0],1)))) # Append homogeneous coordinate to each point.
     transformed = points @ transform.T # Multiply. Using the transpose of the matrix lets us keep the output in row-order.

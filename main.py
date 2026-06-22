@@ -4,27 +4,37 @@ import mediapipe as mp
 import numpy as np
 import cv2
 
-from drawing_stuff import draw_gizmo, draw_landmarks, draw_face_landmarks, draw_hand_landmarks, plot_face_blendshapes_bar_graph
-from math_stuff import convert, make_frustum
-from geometry_data import CANONICAL_LEFTHAND_WEIGHTS, CANONICAL_RIGHTHAND_WEIGHTS,  \
-                          CANONICAL_LEFTHAND_VERTICES, CANONICAL_RIGHTHAND_VERTICES,\
-                          CANONICAL_FACE_WEIGHTS, CANONICAL_FACE_VERTICES
+from drawing_stuff import *
+from math_stuff import *
+from geometry_data import *
+
+DO_FACE_TRACKING = True
+DO_HAND_TRACKING = True
+
+DRAW_FACE_LANDMARKS = True
+DRAW_HAND_LANDMARKS = True
+DRAW_HAND_CANONICAL_MODEL = True
+
+DRAW_FACE_TRANFORM = True
+DRAW_MEDIAPIPE_FACE_TRANSFORM = True # The face landmarker model can also output a transform. We can draw it for comparison purposes.
+DRAW_HAND_TRANSFORM = True
+
+DRAW_ORIGINAL_IMAGE = True
+DO_VIDEO_OUTPUT = True
 
 HAND_LANDMARKER_TASK_PATH = "hand_landmarker.task"
 FACE_LANDMARKER_TASK_PATH = "face_landmarker.task"
 
 REQUESTED_CAMERA_INDEX = 0 # Note that 0 is the default camera for the system.
 REQUESTED_CAMERA_RESOLUTION = (1280, 720)
-REQUESTED_CAMERA_FRAMERATE = 15.0
+REQUESTED_CAMERA_FRAMERATE = 30.0
 
 VIDEO_OUTPUT_FILENAME = "video.webm"
 VIDEO_OUTPUT_FOURCC = "vp80"
 WINDOW_NAME = "video"
 
-DEFAULT_CAMERA_FOVY_DEG= 53.7999992
-# DEFAULT_CAMERA_FOVY_DEG= 62.0
-
-SHOW_TRANSFORM_FROM_FACE_MODEL = False
+# DEFAULT_CAMERA_FOVY_DEG= 53.7999992
+DEFAULT_CAMERA_FOVY_DEG= 62.0
 
 def show_image(image: np.ndarray, name: str) -> int:
     cv2.imshow(name, image)
@@ -57,7 +67,7 @@ def init_face_detector():
     options = mp.tasks.vision.FaceLandmarkerOptions(base_options=base_options,
                                                     running_mode = mp.tasks.vision.RunningMode.VIDEO,
                                                     output_face_blendshapes=True,
-                                                    output_facial_transformation_matrixes=SHOW_TRANSFORM_FROM_FACE_MODEL,
+                                                    output_facial_transformation_matrixes=DRAW_MEDIAPIPE_FACE_TRANSFORM,
                                                     num_faces=1)
     detector = mp.tasks.vision.FaceLandmarker.create_from_options(options)
     return detector
@@ -75,10 +85,10 @@ def is_window_open(name: str) -> bool:
 
 def main():
     # Initialize detector objects and video streams.
-    hand_detector = init_hand_detector()
-    face_detector = init_face_detector()
+    face_detector = init_face_detector() if DO_FACE_TRACKING else None
+    hand_detector = init_hand_detector() if DO_HAND_TRACKING else None
     cam, resolution, fps = init_camera(REQUESTED_CAMERA_INDEX, REQUESTED_CAMERA_RESOLUTION, REQUESTED_CAMERA_FRAMERATE)
-    video_writer = cv2.VideoWriter(VIDEO_OUTPUT_FILENAME, cv2.VideoWriter.fourcc(*VIDEO_OUTPUT_FOURCC), fps, resolution)
+    video_writer = cv2.VideoWriter(VIDEO_OUTPUT_FILENAME, cv2.VideoWriter.fourcc(*VIDEO_OUTPUT_FOURCC), fps, resolution) if DO_VIDEO_OUTPUT else None
 
     # Set up some timing info.
     frame_number: int = 0
@@ -107,52 +117,89 @@ def main():
 
     print("Press ESC to exit, or \"b\" to show blendshape weights.")
     while cam.isOpened():
-        # Read the next video frame (or break out of the loop if we didn't get one) and update timing info.
+        # Read the next video frame (or break out of the loop if we didn't get one).
         success, frame = cam.read()
         if not success: break
+
+        # Update timing info. This is mostly for debug purposes, since the output video will have a fixed framerate.
         current_time_ns = time.monotonic_ns()
         elapsed_ms = int((current_time_ns - last_time_ns) // 1e6)
         timestamp_ms = int(1000 * frame_number / fps)
         last_time_ns = current_time_ns
+
+        # Print some timing info every 10 frames just to avoid spamming the console too much.
         if frame_number % 10 == 0: print(f"Frame {frame_number}, frame time {elapsed_ms}ms, expected {int(1000 / fps)}ms.")
 
-        # Convert to a mediapipe image and run through face+hand detection.
+        # Convert to a mediapipe image and run through face+hand detection (if enabled).
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
-        face_detector_result = face_detector.detect_for_video(mp_image, timestamp_ms)
-        hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms)
+        face_detector_result = face_detector.detect_for_video(mp_image, timestamp_ms) if face_detector is not None else None
+        hand_detector_result = hand_detector.detect_for_video(mp_image, timestamp_ms) if hand_detector is not None else None
 
-        # Create a black image and annotate it with our results. We could overlay on top of the original frame, if we wanted.
-        annotated_image = np.zeros_like(mp_image.numpy_view())
-        # annotated_image = np.copy(mp_image.numpy_view())
+        # Create an image to annotate with our results (either a black image, or a copy of the original).
+        # Using the original image is a much heavier operation for OpenCV.
+        annotated_image = np.copy(mp_image.numpy_view()) if DRAW_ORIGINAL_IMAGE else np.zeros_like(mp_image.numpy_view())
 
         # Process and draw face landmark data, if we got any.
-        if len(face_detector_result.face_landmarks) > 0:
-            annotated_image = draw_face_landmarks(annotated_image, face_detector_result)
+        if face_detector_result is not None and len(face_detector_result.face_landmarks) > 0:
             landmarks = face_detector_result.face_landmarks[0]
             runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_face_indices])
-
             procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_face_landmarks, canonical_face_weights, projection_transform)
-            annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
+            
+            # Draw both the full face landmarks/connections, and also just the set of points from the "canonical landmarks".
+            if DRAW_FACE_LANDMARKS:
+                draw_face_landmarks(annotated_image, face_detector_result)
+                draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
+            if DRAW_FACE_TRANFORM: draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
 
+            # If enabled, draw the face transform that mediapipe gives us.
+            # The main difference between this result and ours is just the camera FOV (defined at top of file).
             if len(face_detector_result.facial_transformation_matrixes) > 0:
-                annotated_image = draw_gizmo(annotated_image, face_detector_result.facial_transformation_matrixes[0], projection_transform, brightness=0.5)
-
-            annotated_image = draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
+                draw_gizmo(annotated_image, face_detector_result.facial_transformation_matrixes[0], projection_transform, brightness=0.5)
 
         # Process and draw hand landmark data, if we got any.
-        if len(hand_detector_result.handedness) > 0: annotated_image = draw_hand_landmarks(annotated_image, hand_detector_result)
-        for i in range(len(hand_detector_result.handedness)):
-            landmarks = hand_detector_result.hand_landmarks[i]
-            hand = hand_detector_result.handedness[i][0].category_name
-            assert hand == "Left" or hand == "Right"
-            runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_hand_indices[hand]])
-            procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_hand_landmarks[hand], canonical_hand_weights[hand], projection_transform)
+        if hand_detector_result is not None and len(hand_detector_result.handedness) > 0:
+            for i in range(len(hand_detector_result.handedness)):
+                landmarks = hand_detector_result.hand_landmarks[i]
+                world = hand_detector_result.hand_world_landmarks[i]
+                hand = hand_detector_result.handedness[i][0].category_name
+                assert (hand == "Left" or hand == "Right")
+                # runtime_screen_landmarks = np.array([[landmarks[i].x, landmarks[i].y, landmarks[i].z] for i in canonical_hand_indices[hand]])
+                runtime_screen_landmarks = np.array([[p.x, p.y, p.z] for p in landmarks])
+                canonical_metric_landmarks = rotate_hand_world_landmarks(np.array([[p.x, p.y, p.z] for p in world]) * 100, hand)
+                canonical_weights = np.ones(len(canonical_metric_landmarks))
+                procrustes_result, runtime_metric_landmarks = convert(runtime_screen_landmarks, canonical_metric_landmarks, canonical_weights, projection_transform)
 
-            annotated_image = draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
-            annotated_image = draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
+                # Draw both the full hand landmarks/connections, and also just the set of points from the "canonical landmarks".
+                if DRAW_HAND_LANDMARKS:
+                    draw_hand_landmarks(annotated_image, landmarks, hand)
+                    draw_landmarks(annotated_image, runtime_metric_landmarks, procrustes_result["transform"], projection_transform, (0, 255, 0))
+                if DRAW_HAND_TRANSFORM: draw_gizmo(annotated_image, procrustes_result["transform"], projection_transform)
+
+            if DRAW_HAND_CANONICAL_MODEL:
+                landmarks = hand_detector_result.hand_world_landmarks[0]
+                hand = hand_detector_result.handedness[0][0].category_name
+                assert (hand == "Left" or hand == "Right")
+                view_transform = np.eye(4)
+                view_transform[:3, 3] = np.array([0, 0, -100])
+
+                points = np.array([[p.x, p.y, p.z] for p in landmarks]) * 100
+                rotated = rotate_hand_world_landmarks(points, hand)
+                ndc = transform_points(rotated, projection_transform @ view_transform, True)
+
+                # Technically this is unnecessarily truncating to integer screen coordinates.
+                # This loses us resolution when we re-project.
+                screen = ndc_to_screen_points(ndc, (annotated_image.shape[1], annotated_image.shape[0]))
+
+                class FakeLandmark:
+                    def __init__(self, x, y):
+                        self.x = x
+                        self.y = y
+
+                unrotated_world = [FakeLandmark(p[0] / annotated_image.shape[1], p[1] / annotated_image.shape[0]) for p in screen]
+                draw_hand_landmarks(annotated_image, unrotated_world, hand)
 
         # Write our annotated video frame to the output stream.
-        video_writer.write(annotated_image)
+        if video_writer is not None: video_writer.write(annotated_image)
 
         # Try to show the image window.
         key_pressed = show_image(annotated_image, WINDOW_NAME)
@@ -160,14 +207,14 @@ def main():
         # If the user closed the window or pressed "ESC", exit the loop.
         if (not is_window_open(WINDOW_NAME)) or (key_pressed == ord('\x1b')): break # '\x1b' is ESC key
 
-        # If the user pressed "b", show the blendshapes plot.
-        if (key_pressed == ord('b')) and len(face_detector_result.face_blendshapes) > 0:
+        # If the user pressed "b" (and the face model is running), show the blendshapes plot.
+        if (key_pressed == ord('b')) and face_detector_result is not None and len(face_detector_result.face_blendshapes) > 0:
             plot_face_blendshapes_bar_graph(face_detector_result.face_blendshapes[0])
 
         frame_number += 1
 
     cv2.destroyAllWindows()
-    video_writer.release()
+    if video_writer is not None: video_writer.release()
     cam.release()
 
 if __name__ == "__main__":
